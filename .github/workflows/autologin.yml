@@ -1,0 +1,86 @@
+name: FreeDNS Auto Login and Extend
+
+# 设置触发条件
+on:
+  # 允许手动运行
+  workflow_dispatch:
+  # 每 30 天自动运行一次 (例如：每月 1 号凌晨 03:00 UTC)
+  schedule:
+    - cron: '0 3 1 * *' 
+
+jobs:
+  auto_login:
+    runs-on: ubuntu-latest
+    
+    # 步骤环境变量：从 GitHub Secrets 导入凭证
+    env:
+      USERNAME: ${{ secrets.AFRAID_USERNAME }}
+      PASSWORD: ${{ secrets.AFRAID_PASSWORD }}
+      
+    steps:
+      - name: ℹ️ Checkout code (Optional, only needed if you have a custom script)
+        uses: actions/checkout@v4
+
+      - name: 🔐 FreeDNS Login and Extend Account
+        id: login
+        run: |
+          # --- 步骤 1: 定义常量 ---
+          LOGIN_URL="https://freedns.afraid.org/sub/login/"
+          DORMANT_EXTEND_URL="https://freedns.afraid.org/dormant/?action=extend"
+          
+          # 存储会话 Cookie 的文件
+          COOKIE_FILE=$(mktemp)
+          
+          echo "尝试登录到 freedns.afraid.org..."
+          
+          # --- 步骤 2: GET 登录页以获取初始会话 Cookie ---
+          # 这一步是确保我们获得了 freedns.afraid.org 服务器设置的初始 Cookie
+          curl -s -L -c "$COOKIE_FILE" "$LOGIN_URL" > /dev/null
+          
+          echo "已获取初始会话 Cookie: $COOKIE_FILE"
+          
+          # --- 步骤 3: POST 提交登录表单 ---
+          # 警告：freedns.afraid.org 的表单字段名可能需要调整 (这里假设是 username 和 password)
+          # 注意：此网站可能需要 CSRF 令牌。如果登录失败，请检查登录页面 HTML，并添加一个 cURL 步骤来提取它。
+          LOGIN_DATA="username=${USERNAME}&password=${PASSWORD}&submit=Login"
+          
+          LOGIN_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" -c "$COOKIE_FILE" -X POST \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "User-Agent: GitHubActionsBot" \
+            -d "$LOGIN_DATA" \
+            --write-out "%{http_code}" \
+            "$LOGIN_URL")
+            
+          HTTP_CODE=${LOGIN_RESPONSE: -3}
+          
+          echo "登录 POST 请求完成。HTTP 状态码: $HTTP_CODE"
+          
+          if [[ "$HTTP_CODE" -ne 302 ]] && [[ "$HTTP_CODE" -ne 301 ]]; then
+            echo "::error:: 登录失败！服务器没有返回预期的重定向状态码 (301/302)。"
+            echo "请检查用户名/密码或表单字段名是否正确。"
+            exit 1
+          fi
+
+          echo "登录成功，会话已建立。尝试延长账户期限..."
+          
+          # --- 步骤 4: 访问延长账户页面 ---
+          # 模拟点击 "Extend your account" 按钮
+          EXTEND_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" \
+            -H "User-Agent: GitHubActionsBot" \
+            "$DORMANT_EXTEND_URL")
+            
+          # --- 步骤 5: 验证结果 ---
+          if echo "$EXTEND_RESPONSE" | grep -q "Your account has been extended"; then
+            echo "✅ 账户延长成功！"
+          elif echo "$EXTEND_RESPONSE" | grep -q "You have no dormant domains"; then
+            echo "✅ 账户目前没有休眠域名，任务完成。"
+          else
+            # 访问控制面板检查是否包含 'Last IP' 作为登录成功的标志
+            CONTROL_PANEL_CHECK=$(curl -s -L -b "$COOKIE_FILE" "https://freedns.afraid.org/sub/control/")
+            if echo "$CONTROL_PANEL_CHECK" | grep -q "Last IP"; then
+              echo "⚠️ 延长操作可能没有发生，但登录会话有效 ('Last IP' 找到)。任务完成。"
+            else
+              echo "::error:: 延长操作失败或登录会话已失效。请手动检查账户。"
+              exit 1
+            fi
+          fi
