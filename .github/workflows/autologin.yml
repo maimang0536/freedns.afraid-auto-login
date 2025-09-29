@@ -1,111 +1,76 @@
-// 在 Worker 设置中定义的 Secrets 变量
-const USERNAME = YOUR_USERNAME_SECRET;
-const PASSWORD = YOUR_PASSWORD_SECRET;
+name: FreeDNS Auto Login (zc.php, 200 OK)
 
-const BASE_URL = 'https://freedns.afraid.org';
-// 登录目标 URL 更新为您提供的 URL
-const LOGIN_URL = `${BASE_URL}/zc.php`; 
-const DORMANT_EXTEND_URL = `${BASE_URL}/dormant/?action=extend`; 
-// 登录后检查成功的 URL，例如子域名控制面板
-const SUCCESS_CHECK_URL = `${BASE_URL}/sub/control/`; 
+# 设置触发条件
+on:
+  # 允许手动运行
+  workflow_dispatch:
+  # 每月 1 号凌晨 03:00 UTC 自动运行一次
+  schedule:
+    - cron: '0 3 1 * *' 
 
-/**
- * 模拟完整的登录和延长账户流程
- */
-addEventListener('fetch', event => {
-    event.respondWith(handleLoginAndExtend());
-});
-
-async function handleLoginAndExtend() {
-    let sessionCookies = ''; // 存储和传递整个会话的 Cookie
+jobs:
+  auto_login:
+    runs-on: ubuntu-latest
     
-    // --- 步骤 1: 访问 zc.php 获取初始会话 Cookie/CSRF (如果需要) ---
-    // 首次 GET 请求通常用于初始化会话和获取潜在的 CSRF 令牌
-    try {
-        const initialGetResponse = await fetch(LOGIN_URL);
-        sessionCookies = initialGetResponse.headers.get('Set-Cookie') || '';
-        
-        // **注意：** freedns.afraid.org 的表单提交很可能需要 CSRF 令牌或隐藏字段。
-        // 如果需要，您必须解析 initialGetResponse.text() 来提取它。
-        // 由于 Worker 缺乏 DOM 解析能力，此代码假设不需要，但若登录失败，请手动检查。
-        
-    } catch (e) {
-        return new Response(`初始化 GET 请求失败: ${e.message}`, { status: 500 });
-    }
+    # 步骤环境变量：从 GitHub Secrets 导入凭证
+    env:
+      USERNAME: ${{ secrets.AFRAID_USERNAME }}
+      PASSWORD: ${{ secrets.AFRAID_PASSWORD }}
+      
+    steps:
+      - name: 🔐 FreeDNS Login and Extend Account (zc.php)
+        id: login
+        run: |
+          # --- 步骤 1: 定义常量 ---
+          BASE_URL="https://freedns.afraid.org"
+          LOGIN_URL="${BASE_URL}/zc.php"
+          DORMANT_EXTEND_URL="${BASE_URL}/dormant/?action=extend"
+          SUCCESS_INDICATOR="Last IP"
+          
+          # 存储会话 Cookie 的文件
+          COOKIE_FILE=$(mktemp)
+          
+          echo "尝试登录到 ${LOGIN_URL}..."
+          
+          # --- 步骤 2: GET 登录页以获取初始会话 Cookie ---
+          # -c 保存 Cookie 到 COOKIE_FILE
+          curl -s -L -c "$COOKIE_FILE" "$LOGIN_URL" > /dev/null
+          
+          echo "已获取初始会话 Cookie。"
+          
+          # --- 步骤 3: POST 提交登录表单 ---
+          # 登录数据：确保字段名与 freedns.afraid.org 的表单匹配
+          LOGIN_DATA="username=${USERNAME}&password=${PASSWORD}&submit=Login"
+          
+          # -b 携带 Cookie；-c 保存新的 Cookie；-s 静默模式；-L 跟随重定向（保留以防万一）
+          LOGIN_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" -c "$COOKIE_FILE" -X POST \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "User-Agent: GitHubActionsBot" \
+            -d "$LOGIN_DATA" \
+            "$LOGIN_URL")
+            
+          # 验证登录成功：检查响应内容是否包含成功标志
+          if echo "$LOGIN_RESPONSE" | grep -q "$SUCCESS_INDICATOR"; then
+            echo "✅ 登录成功！页面内容包含: ${SUCCESS_INDICATOR}"
+          else
+            echo "::error:: 登录失败！未在响应内容中找到 '${SUCCESS_INDICATOR}'。"
+            echo "请检查用户名/密码、表单字段名或登录 URL (${LOGIN_URL}) 是否正确。"
+            exit 1
+          fi
 
-    // --- 步骤 2: POST 提交登录表单 ---
-    const formData = new URLSearchParams();
-    formData.append('username', USERNAME);
-    formData.append('password', PASSWORD);
-    // 假设表单中有一个提交按钮名为 'submit'，值可能为 'Login' 或其他
-    formData.append('submit', 'Login'); 
-
-    // 发送 POST 请求进行登录
-    const loginPostResponse = await fetch(LOGIN_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            // 携带第一步获得的会话 Cookie
-            'Cookie': sessionCookies, 
-            'User-Agent': 'CloudflareWorker/1.0 (AfraidAutoLogin)',
-            'Referer': LOGIN_URL,
-        },
-        body: formData.toString(),
-        redirect: 'manual' // 保持手动处理，以防意外的 Set-Cookie
-    });
-    
-    // 捕获登录 POST 响应中新的或更新的 Cookie
-    const newCookies = loginPostResponse.headers.get('Set-Cookie');
-    if (newCookies) {
-        // 简单地将新的 Cookie 追加到当前会话 Cookie 中
-        sessionCookies = `${sessionCookies.length > 0 ? sessionCookies + '; ' : ''}${newCookies}`;
-    }
-
-    // --- 步骤 3: 验证登录是否成功 (访问控制面板) ---
-    // 登录 POST 成功后，服务器应该已经将会话 Cookie 包含在 sessionCookies 中。
-    const checkResponse = await fetch(SUCCESS_CHECK_URL, {
-        method: 'GET',
-        headers: {
-            'Cookie': sessionCookies, // 携带登录会话 Cookie
-            'User-Agent': 'CloudflareWorker/1.0 (AfraidAutoLogin)',
-        }
-    });
-
-    const checkBodyText = await checkResponse.text();
-
-    // 检查页面内容是否包含登录成功的标志，例如 'Last IP' 或您的用户名
-    if (!checkBodyText.includes('Last IP') && !checkBodyText.includes(USERNAME)) {
-        return new Response(`❌ 自动登录失败。访问控制面板时未找到 'Last IP'。请检查用户名/密码。`, { status: 200 });
-    }
-    
-    // --- 步骤 4: 访问休眠账户页面并延长 ---
-    // 模拟 Python 代码中的延长操作
-    const extendResponse = await fetch(DORMANT_EXTEND_URL, {
-        method: 'GET',
-        headers: {
-            'Cookie': sessionCookies, // 必须携带登录后的会话 Cookie
-            'User-Agent': 'CloudflareWorker/1.0 (AfraidAutoLogin)',
-        }
-    });
-    
-    const extendBodyText = await extendResponse.text();
-
-    // --- 步骤 5: 验证延长结果 ---
-    if (extendBodyText.includes('Your account has been extended')) {
-        return new Response(`✅ Freedns.afraid.org 自动登录并延长账户成功!`, { 
-            status: 200,
-            headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-        });
-    } else if (extendBodyText.includes('You have no dormant domains')) {
-        return new Response(`✅ 自动登录成功，但目前没有休眠域名需要延长。`, { 
-            status: 200,
-            headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-        });
-    } else {
-        // 登录成功，但延长失败或延长页面返回内容不明确
-        return new Response(`⚠️ 登录成功，但延长操作可能失败。请手动检查账户。`, { 
-            status: 200,
-            headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-        });
-    }
-}
+          echo "登录会话有效。尝试延长账户期限..."
+          
+          # --- 步骤 4: 访问延长账户页面 ---
+          EXTEND_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" \
+            -H "User-Agent: GitHubActionsBot" \
+            "$DORMANT_EXTEND_URL")
+            
+          # --- 步骤 5: 验证延长结果 ---
+          if echo "$EXTEND_RESPONSE" | grep -q "Your account has been extended"; then
+            echo "✅ 账户延长成功！"
+          elif echo "$EXTEND_RESPONSE" | grep -q "You have no dormant domains"; then
+            echo "✅ 账户目前没有休眠域名，任务完成。"
+          else
+            echo "⚠️ 延长操作失败或页面内容不明确。请手动检查账户。"
+            # 不终止流程，因为登录已成功，但发出警告
+          fi
