@@ -1,6 +1,11 @@
-name: FreeDNS Auto Login (终极调试版)
+name: FreeDNS Auto Login (URL Parameter Method)
 
-# ... (其他配置保持不变，如 on: 和 jobs:)
+# 设置触发条件
+on:
+  workflow_dispatch:
+  # 每月 1 号凌晨 03:00 UTC 自动运行一次
+  schedule:
+    - cron: '0 3 1 * *' 
 
 jobs:
   auto_login:
@@ -11,77 +16,59 @@ jobs:
       PASSWORD: ${{ secrets.AFRAID_PASSWORD }}
       
     steps:
-      - name: 🔍 详细调试登录过程
-        id: debug_login
+      - name: 🔐 使用 URL 参数尝试自动登录
+        id: url_login
         run: |
-          # --- 步骤 1: 定义常量 ---
-          BASE_URL="https://freedns.afraid.org"
-          LOGIN_URL="${BASE_URL}/zc.php"
-          DORMANT_EXTEND_URL="${BASE_URL}/dormant/?action=extend"
-          SUCCESS_INDICATOR="Subdomains" # 尝试一个常见的成功标志
+          # --- 步骤 1: 定义常量和 URL ---
+          # 注意：URL 经过 URL 编码 (URL Encoding)
+          # "/subdomain/" 编码后为 L3N1YmRvbWFpbi8=
+          # 这是 freedns.afraid.org 用于触发特定操作（如登录和跳转到子域名页）的格式。
+          BASE_LOGIN_URL="https://freedns.afraid.org/zc.php?/step=2&from=L3N1YmRvbWFpbi8=&action=auth"
           
-          # 存储会话 Cookie 的文件和 HTML 文件的临时位置
-          COOKIE_FILE=$(mktemp)
-          HTML_FILE=$(mktemp)
+          # 构造完整的带凭证的 URL
+          FULL_URL="${BASE_LOGIN_URL}&username=${USERNAME}&password=${PASSWORD}"
           
-          echo "### 1. GET 登录页以获取 Cookie 和 CSRF 令牌 ###"
+          echo "尝试访问 URL: ${BASE_LOGIN_URL}&username=...&password=..."
           
-          # 使用 -v (详细模式) 获取登录页，并将响应的 HTML 写入 HTML_FILE
-          LOGIN_PAGE_HTML=$(curl -v -s -L -c "$COOKIE_FILE" "$LOGIN_URL" -o "$HTML_FILE" 2>&1)
+          # --- 步骤 2: 发送 HEAD 请求并检查重定向 ---
+          # 模拟原脚本，发送一个 HEAD 请求 (-I)
+          # 如果登录成功，服务器应该会重定向 (HTTP 302/303) 到控制面板。
           
-          echo "$LOGIN_PAGE_HTML"
-          echo "--- 提取 CSRF 令牌 ---"
+          CURL_OUTPUT=$(curl -s -L -I --write-out "* HTTP_CODE: %{http_code}\n* REDIRECT_URL: %{redirect_url}\n* URL_EFFECTIVE: %{url_effective}\n" -o /dev/null "$FULL_URL")
           
-          # 从保存的 HTML 文件中提取 CSRF 令牌 (假设字段名为 csrf_token)
-          CSRF_TOKEN=$(grep -o 'name="csrf_token" value="[^"]*"' "$HTML_FILE" | head -1 | sed 's/.*value="\([^"]*\)".*/\1/')
+          echo -e "\n--- cURL 检查结果 ---\n$CURL_OUTPUT"
+          
+          # 从输出中提取重定向 URL
+          REDIRECT_URL=$(echo "$CURL_OUTPUT" | grep "REDIRECT_URL" | awk '{print $NF}')
+          
+          echo -e "Note: 如果 'REDIRECT_URL' 为空，则表示自动登录失败。"
 
-          if [ -z "$CSRF_TOKEN" ]; then
-              echo "✅ 未找到名为 'csrf_token' 的隐藏字段，继续执行。"
+          # --- 步骤 3: 验证结果 ---
+          # 检查 REDIRECT_URL 是否包含登录后页面的特征 (例如：/subdomain/ 或 /sub/control/)
+          if [[ "$REDIRECT_URL" == *"/subdomain/"* ]] || [[ "$REDIRECT_URL" == *"/sub/control/"* ]]; then
+            echo "✅ URL 自动登录成功！重定向到控制面板。"
           else
-              echo "✅ 成功提取 CSRF 令牌: ${CSRF_TOKEN}"
-          fi
-          
-          echo "### 2. POST 提交登录表单 ###"
-          
-          # 构造 POST 数据。请检查并修改这里的字段名（username, password, submit=Login）
-          # 如果您发现字段名不同，请在此处修改！
-          # 我们将 CSRF 令牌添加到 POST 数据中
-          LOGIN_DATA="username=${USERNAME}&password=${PASSWORD}&submit=Login&csrf_token=${CSRF_TOKEN}"
-          
-          echo "POST 数据载荷: ${LOGIN_DATA}"
-          
-          # 再次使用 -v 进行 POST 请求，携带 Cookie (-b) 并保存新的 Cookie (-c)
-          POST_DEBUG_OUTPUT=$(curl -v -s -L -b "$COOKIE_FILE" -c "$COOKIE_FILE" -X POST \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -H "User-Agent: GitHubActionsBot" \
-            -d "$LOGIN_DATA" \
-            "$LOGIN_URL" -o "$HTML_FILE" 2>&1)
-
-          echo "$POST_DEBUG_OUTPUT"
-          
-          # 读取 POST 请求返回的 HTML 内容进行检查
-          LOGIN_RESPONSE=$(cat "$HTML_FILE")
-          
-          # --- 步骤 3: 验证登录成功 ---
-          if echo "$LOGIN_RESPONSE" | grep -q "$SUCCESS_INDICATOR"; then
-            echo "✅ 登录成功！页面内容包含: ${SUCCESS_INDICATOR}"
-          else
-            echo "::error:: 登录失败！未在响应内容中找到 '${SUCCESS_INDICATOR}'。"
-            echo "--- POST 响应 HTML 预览 (错误页或登录表单) ---"
-            echo "$LOGIN_RESPONSE" | head -n 30
-            echo "----------------------------------------------------"
+            echo "::error:: 自动登录失败！未检测到有效的控制面板重定向链接。"
+            echo "请检查用户名和密码是否正确，以及 freedns.afraid.org 是否仍支持此种登录方式。"
             exit 1
           fi
 
-          # --- 步骤 4: 延长账户期限 ---
+          # 由于这种方法通常也包含了“访问”账户的操作，可能已自动保持活跃。
+          # 如果您需要明确延长休眠账户，请添加以下步骤：
+
           echo "登录会话有效。尝试延长账户期限..."
-          EXTEND_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" -H "User-Agent: GitHubActionsBot" "$DORMANT_EXTEND_URL")
-            
-          # --- 步骤 5: 验证延长结果 ---
+          DORMANT_EXTEND_URL="https://freedns.afraid.org/dormant/?action=extend"
+          
+          # 再次使用 URL 登录方式（携带凭证）来访问延长页面
+          # 这种 URL 方式登录通常不会设置持续性的 Cookie，因此每次请求都需携带凭证。
+          EXTEND_URL="${DORMANT_EXTEND_URL}&username=${USERNAME}&password=${PASSWORD}"
+          
+          EXTEND_RESPONSE=$(curl -s -L "$EXTEND_URL")
+
           if echo "$EXTEND_RESPONSE" | grep -q "Your account has been extended"; then
             echo "✅ 账户延长成功！"
           elif echo "$EXTEND_RESPONSE" | grep -q "You have no dormant domains"; then
             echo "✅ 账户目前没有休眠域名，任务完成。"
           else
-            echo "⚠️ 延长操作失败或页面内容不明确。请手动检查账户。"
+            echo "⚠️ 延长操作结果不明确，请手动检查账户。"
           fi
