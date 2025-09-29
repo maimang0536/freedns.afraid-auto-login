@@ -25,7 +25,7 @@ jobs:
         id: login
         run: |
           # --- 步骤 1: 定义常量 ---
-          LOGIN_URL="https://freedns.afraid.org/sub/login/"
+          LOGIN_URL="https://freedns.afraid.org/zc.php"
           DORMANT_EXTEND_URL="https://freedns.afraid.org/dormant/?action=extend"
           
           # 存储会话 Cookie 的文件
