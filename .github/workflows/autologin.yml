@@ -1,18 +1,10 @@
-name: FreeDNS Auto Login (zc.php, 200 OK - 检查用户名)
-
-# 设置触发条件
-on:
-  # 允许手动运行
-  workflow_dispatch:
-  # 每月 1 号凌晨 03:00 UTC 自动运行一次
-  schedule:
-    - cron: '0 3 1 * *' 
+name: FreeDNS Auto Login (zc.php, 200 OK - 调试版)
+# ... (其他配置保持不变)
 
 jobs:
   auto_login:
     runs-on: ubuntu-latest
     
-    # 步骤环境变量：从 GitHub Secrets 导入凭证
     env:
       USERNAME: ${{ secrets.AFRAID_USERNAME }}
       PASSWORD: ${{ secrets.AFRAID_PASSWORD }}
@@ -25,8 +17,8 @@ jobs:
           BASE_URL="https://freedns.afraid.org"
           LOGIN_URL="${BASE_URL}/zc.php"
           DORMANT_EXTEND_URL="${BASE_URL}/dormant/?action=extend"
-          # 使用用户名作为登录成功的标志
-          SUCCESS_INDICATOR="${USERNAME}" 
+          # 更改成功指示器为登录后控制面板上常见的链接文本
+          SUCCESS_INDICATOR="Subdomains" 
           
           # 存储会话 Cookie 的文件
           COOKIE_FILE=$(mktemp)
@@ -34,38 +26,43 @@ jobs:
           echo "尝试登录到 ${LOGIN_URL}..."
           
           # --- 步骤 2: GET 登录页以获取初始会话 Cookie ---
-          # -c 保存 Cookie 到 COOKIE_FILE
-          curl -s -L -c "$COOKIE_FILE" "$LOGIN_URL" > /dev/null
+          # 我们也需要捕获登录页面的 HTML，以防需要 CSRF 令牌
+          LOGIN_PAGE_HTML=$(curl -s -L -c "$COOKIE_FILE" "$LOGIN_URL")
           
           echo "已获取初始会话 Cookie。"
           
-          # --- 步骤 3: POST 提交登录表单 ---
-          # 登录数据：确保字段名与 freedns.afraid.org 的表单匹配
+          # **!!! 关键调试区域 !!!**
+          # 确保这里的字段名与 freedns.afraid.org 登录表单的 'name' 属性完全匹配
+          # 请在浏览器中检查：username_field, password_field, submit_button
           LOGIN_DATA="username=${USERNAME}&password=${PASSWORD}&submit=Login"
           
-          # -b 携带 Cookie；-c 保存新的 Cookie；-s 静默模式；-L 跟随重定向
+          # --- 步骤 3: POST 提交登录表单 ---
           LOGIN_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" -c "$COOKIE_FILE" -X POST \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -H "User-Agent: GitHubActionsBot" \
             -d "$LOGIN_DATA" \
             "$LOGIN_URL")
             
-          # 验证登录成功：检查响应内容是否包含用户名 (SUCCESS_INDICATOR)
+          # 验证登录成功：检查响应内容是否包含新的成功标志 'Subdomains'
           if echo "$LOGIN_RESPONSE" | grep -q "$SUCCESS_INDICATOR"; then
-            echo "✅ 登录成功！页面内容包含用户名: ${SUCCESS_INDICATOR}"
+            echo "✅ 登录成功！页面内容包含: ${SUCCESS_INDICATOR}"
           else
             echo "::error:: 登录失败！未在响应内容中找到 '${SUCCESS_INDICATOR}'。"
-            echo "请检查用户名/密码、表单字段名或登录 URL (${LOGIN_URL}) 是否正确。"
-            # 可选：将响应内容输出到日志，用于调试
-            # echo "--- 响应内容预览 ---"
-            # echo "$LOGIN_RESPONSE" | head -n 30
-            # echo "----------------------"
+            echo "请检查以下潜在问题："
+            echo "1. 用户名/密码是否正确。"
+            echo "2. 登录数据的字段名是否正确：'username', 'password', 'submit=Login'。"
+            echo "3. 是否需要 CSRF 令牌。"
+            echo ""
+            echo "--- 服务器返回的 HTML 响应预览 (用于调试) ---"
+            # 打印响应的前 30 行，以便您在 GitHub Actions 日志中看到错误或提示
+            echo "$LOGIN_RESPONSE" | head -n 30
+            echo "-------------------------------------------------"
             exit 1
           fi
 
           echo "登录会话有效。尝试延长账户期限..."
           
-          # --- 步骤 4: 访问延长账户页面 ---
+          # --- 步骤 4: 访问延长账户页面 (如果成功，后面的步骤无需更改) ---
           EXTEND_RESPONSE=$(curl -s -L -b "$COOKIE_FILE" \
             -H "User-Agent: GitHubActionsBot" \
             "$DORMANT_EXTEND_URL")
@@ -77,5 +74,4 @@ jobs:
             echo "✅ 账户目前没有休眠域名，任务完成。"
           else
             echo "⚠️ 延长操作失败或页面内容不明确。请手动检查账户。"
-            # 登录已经成功，不终止流程，但发出警告
           fi
