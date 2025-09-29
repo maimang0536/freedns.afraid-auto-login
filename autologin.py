@@ -35,7 +35,7 @@ except ImportError:
 def main(logger):
 
     parser = argparse.ArgumentParser(description=' \
-        Logs in freedns.afraid.org using USERNAME/PASSWORD from settings.py. \
+        Logs in https://freedns.afraid.org/zc.php using USERNAME/PASSWORD from settings.py. \
         Avoids account from being terminated due to inactivity (6 months).\
         Run this script using cron every few months:\
             source bin/activate && python autologin.py')
